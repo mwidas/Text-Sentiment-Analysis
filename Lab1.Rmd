@@ -1,0 +1,201 @@
+## Assignment (Due Tuesday 4/9 11:59pm)
+Reminder: Please suppress all long and extraneous output from your submissions (ex:  lists of tokens).
+
+1.  Create a free New York Times account (<https://developer.nytimes.com/get-started>)
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(jsonlite) #convert results from API queries into R-friendly formats 
+library(tidyverse) #tidy
+library(tidytext) #text data management and analysis
+library(ggplot2) #plot word frequencies and publication dates
+
+#assign API key.  When you create a NYT Dev account, you will be given a key
+source(here::here("API_KEY.R"))
+API_KEY <- print(API_KEY)
+
+```
+
+2.  Pick an interesting environmental key word(s) and use the {jsonlite} package to query the API. Pick something high profile enough and over a large enough time frame that your query yields enough articles for an interesting examination.
+
+```{r}
+term1 <- "remediation" 
+begin_date <- "20180101"
+end_date <- "20230101"
+
+#construct the query url using API operators
+baseurl <- paste0("http://api.nytimes.com/svc/search/v2/articlesearch.json?q=",
+                  term1, "%20",
+                  "&begin_date=", begin_date,
+                  "&end_date=", end_date,
+                  "&facet_filter=true",
+                  "&api-key=", API_KEY)
+
+#examine our query url
+baseurl
+```
+
+```{r, eval=FALSE}
+#run initial query
+initialQuery <- fromJSON(baseurl)
+
+#maxPages <- round((initialQuery$response$meta$hits[1] / 10)-1) 
+maxPages <- 10
+#initiate a list to hold results of our for loop
+pages <- list()
+
+#loop
+for(i in 0:maxPages){
+  nytSearch <- fromJSON(paste0(baseurl, "&page=",i), flatten = TRUE) %>% data.frame()
+  message("Retrieving page ", i)
+  pages[[i+1]] <- nytSearch 
+  Sys.sleep(12)
+}
+
+#bind the pages and create a tibble from nytDat
+nyt_df <- bind_rows(pages)
+```
+
+3.  Recreate the publications per day and word frequency plots using the first paragraph field.  This time filter on the response.docs.news_desk variable to winnow out irrelevant results.
+
+```{r article-type}
+nyt_df %>% 
+  group_by(response.docs.news_desk) %>%
+  summarize(count=n()) %>% #This creates a new data frame with the count of records for each news_desk.
+  mutate(percent = (count / sum(count))*100) %>% #add percent of total column
+  ggplot() +
+  geom_bar(aes(y=percent, x=response.docs.news_desk, fill=response.docs.news_desk), stat = "identity") + coord_flip()
+```
+
+```{r date-plot}
+nytDat <- nyt_df
+
+nytDat %>%
+  mutate(pubDay=gsub("T.*","",response.docs.pub_date)) %>% 
+  group_by(pubDay) %>%
+  summarise(count=n()) %>%
+  filter(count >= 2) %>%
+  ggplot() +
+  geom_bar(aes(x=reorder(pubDay, count), y=count), stat="identity") +
+  coord_flip() #bring date so bars go lengthwise
+```
+
+```{r word_frequencies}
+names(nytDat)
+head(nytDat[,1:6])
+#The 6th column, "response.doc.lead_paragraph", is the one we want here.
+nytDat[6] 
+
+#use tidytext::unnest_tokens to put in tidy form.  
+#If there are some types of news that we'd like to exclude, we can filter()
+tokenized <- nytDat %>%
+  filter(response.docs.news_desk!=c("Games","Sports")) %>%
+unnest_tokens(word, response.docs.lead_paragraph) #word is the new column, paragraph is the source
+
+tokenized[,"word"]
+
+tokenized %>%
+  count(word, sort = TRUE) %>%
+  filter(n > 50) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(n, word)) +
+  geom_col()+
+  labs(y = NULL)
+```
+
+
+-   Make some (at least 3) transformations to the corpus including: add context-specific stopword(s), stem a key term and its variants, remove numbers)
+
+```{r stop-words}
+#load stop words
+data(stop_words)
+
+#stop word anti_join
+tokenized <- tokenized %>%
+  anti_join(stop_words)
+
+#now let's try that plot again
+tokenized %>%
+  count(word, sort = TRUE) %>%
+  filter(n > 3) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(n, word)) +
+  geom_col()+
+  labs(y = NULL)
+```
+
+```{r cleaning}
+#remove all numbers
+clean_tokens <- str_remove_all(tokenized$word, "[:digit:]") 
+
+#remove s contractions
+clean_tokens <- gsub("’s", '', clean_tokens)
+
+tokenized$clean <- clean_tokens
+
+tokenized %>%
+  count(clean, sort = TRUE) %>%
+  mutate(clean = reorder(clean, n)) %>%
+  ggplot(aes(n, clean)) +
+  geom_col() +
+  labs(y = NULL)
+
+#remove the empty strings
+tib <-subset(tokenized, clean!="")
+
+#reassign
+tokenized <- tib
+
+#try without dates
+tokenized %>%
+  count(clean, sort = TRUE) %>%
+  filter(n > 3) %>% 
+  mutate(clean = reorder(clean, n)) %>%
+  ggplot(aes(n, clean)) +
+  geom_col() +
+  labs(y = NULL) +
+  labs(title = "Word Frequencies in Paragraphs")
+```
+
+4.  Recreate the publications per day and word frequency plots using the headlines variable (response.docs.headline.main). Compare the distributions of word frequencies between the first paragraph and headlines. Do you see any difference?
+
+```{r date-plot}
+nytDat <- nyt_df
+
+nytDat %>%
+  mutate(pubDay=gsub("T.*","",response.docs.pub_date)) %>% 
+  group_by(pubDay) %>%
+  summarise(count=n()) %>%
+  filter(count >= 2) %>%
+  ggplot() +
+  geom_bar(aes(x=reorder(pubDay, count), y=count), stat="identity") +
+  coord_flip() #bring date so bars go lengthwise
+```
+
+```{r word_frequencies}
+names(nytDat)
+#The 6th column, "response.doc.headline.main", is the one we want here.
+nytDat[21] 
+
+#use tidytext::unnest_tokens to put in tidy form.  
+#If there are some types of news that we'd like to exclude, we can filter()
+tokenized_headline <- nytDat %>%
+  filter(response.docs.news_desk!=c("Games","Sports")) %>%
+unnest_tokens(word, response.docs.headline.main) #word is the new column, paragraph is the source
+
+tokenized_headline[,"word"]
+
+#stop word anti_join
+tokenized_headline <- tokenized_headline %>%
+  anti_join(stop_words)
+
+tokenized_headline %>%
+  count(word, sort = TRUE) %>%
+  filter(n > 3) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(n, word)) +
+  geom_col()+
+  labs(y = NULL, title = "Word Frequencies in Headlines")
+```
+
+**I see the same distribution between the headlines and the paragraphs**

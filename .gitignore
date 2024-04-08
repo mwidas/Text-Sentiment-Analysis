@@ -50,3 +50,6 @@ rsconnect/
 
 #file storing API_KEY
 /API_KEY.R
+
+/data
+

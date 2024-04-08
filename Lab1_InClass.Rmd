@@ -13,9 +13,9 @@ library(tidytext) #text data management and analysis
 library(ggplot2) #plot word frequencies and publication dates
 
 #assign API key.  When you create a NYT Dev account, you will be given a key
-source("API_KEY.R")
+source(here::here("API_KEY.R"))
+API_KEY <- print(API_KEY)
 
-API_KEY = API_KEY
 ```
 
 Today we will be grabbing some data from the New York Times database via their API, then running some basic string manipulations, trying out the tidytext format, and creating some basic plots.

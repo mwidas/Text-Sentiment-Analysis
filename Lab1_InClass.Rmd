@@ -203,6 +203,8 @@ clean_tokens <- str_remove_all(tokenized$word, "[:digit:]")
 
 clean_tokens <- gsub("'s", "", clean_tokens)
 
+clean_tokens <- gsub("'s", "", clean_tokens)
+
 tokenized$clean <- clean_tokens
 
 # removes empty strings 

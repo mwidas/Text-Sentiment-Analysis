@@ -210,3 +210,4 @@ When  λ is lower, the score emphasizes the distinctiveness of terms, bringing o
 
 Relevance(w,t) = λ×P(w∣t)+(1−λ)×P(w∣t)/P(w) 
 
+**want to start assignment with dat2 from last weeks asignment**

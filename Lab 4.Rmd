@@ -1,0 +1,211 @@
+---
+title: "Lab 4"
+author: "Melissa Widas"
+date: "2024-04-24"
+output: html_document
+---
+
+Lab 4 Assignment: Due May 7 at 11:59pm
+
+1. Select another classification algorithm. 
+
+**I am going to choose Random Forest**
+
+2. Conduct an initial out-of-the-box model fit on the training data and prediction on the test data.  Assess the performance of this initial model. 
+
+```{r packages, message=FALSE, warning=FALSE}
+library(tidytext)
+library(tidyverse)
+library(tidymodels)
+library(textrecipes)
+library(randomForest) # naive-bayes
+library(vip)
+
+
+# load data
+urlfile ="https://raw.githubusercontent.com/MaRo406/EDS-231-text-sentiment/main/data/climbing_reports_model_dat.csv"
+incidents_df<-readr::read_csv(url(urlfile))
+
+set.seed(1234)
+
+# split data
+incidents2class <- incidents_df %>%
+  mutate(fatal = factor(if_else(
+                        is.na(Deadly),
+                        "non-fatal", "fatal")))
+
+
+incidents_split <- initial_split(incidents2class, strata = fatal)
+
+incidents_train <- training(incidents_split)
+incidents_test <- testing(incidents_split)
+
+# create recipe
+incidents_rec <- recipe(fatal ~ Text, data = incidents_train)
+
+# recipe pre-processing
+recipe <- incidents_rec %>%
+  step_tokenize(Text) %>%
+  step_tokenfilter(Text, max_tokens = 1000) %>%
+  step_tfidf(Text)
+
+# models spec
+rf_spec <- rand_forest() %>%
+  set_mode("classification") %>%
+  set_engine("ranger")
+
+# make folds
+incidents_folds <- vfold_cv(incidents_train)
+
+# tidymodels workflow
+incidents_wf <- workflow() %>%
+  add_recipe(recipe) |> 
+  add_model(rf_spec)
+
+# model fit
+rf_rs <- fit_resamples(
+  incidents_wf, 
+  incidents_folds, 
+  control = control_resamples(save_pred = T)
+)
+
+rf_rs_metrics <- collect_metrics(rf_rs)
+rf_rs_predictions <- collect_predictions(rf_rs)
+
+rf_rs_metrics
+# rf_rs_predictions
+
+box_roc <- rf_rs_predictions |> 
+  group_by(id) |> 
+  roc_curve(truth = fatal, .pred_fatal) |> 
+  autoplot() +
+  labs("Resamples", title = "Random Forest ROC curve for Climbing Incident Reports")
+
+box_roc
+```
+
+**The initial performance of this model was had an accuracy of 0.866 and roc-auc of 0.956.**
+
+3. Select the relevant hyperparameters for your algorithm and tune your model.
+
+**The hyperparameters I will be tuning for this model will be `mtry()` and the number of `trees()`.**
+
+4. Conduct a model fit using your newly tuned model specification.  How does it compare to your out-of-the-box model?
+
+```{r, message=FALSE, warning=FALSE}
+rf_spec_tune <- rand_forest(mtry = tune(),
+                  trees = tune()) |> 
+  set_engine("ranger", importance = "impurity") |> 
+  set_mode("classification")
+
+# make folds
+incidents_folds <- vfold_cv(incidents_train)
+
+# tidymodels workflow
+incidents_wf_tune <- workflow() %>%
+  add_recipe(recipe) |> 
+  add_model(rf_spec_tune)
+
+#use cross validation to tune mtry and trees parameters
+# took some time to load so write to .rda file for ease of use
+# rf_cv_tune = incidents_wf_tune %>%
+#   tune_grid(resamples = incidents_folds, grid = 10)
+
+#write_rds(rf_cv_tune, "rf_tune.rda")
+rf_cv_tune <- read_rds("rf_tune.rda")
+
+rf_incidents_tune_final <- finalize_workflow(incidents_wf_tune,
+                             select_best(rf_cv_tune, metric = "roc_auc"))
+
+# model fit
+rf_tune_rs <- fit_resamples(
+  rf_incidents_tune_final, 
+  incidents_folds, 
+  control = control_resamples(save_pred = T)
+)
+
+rf_tune_rs_metrics <- collect_metrics(rf_tune_rs)
+rf_tune_rs_predictions <- collect_predictions(rf_tune_rs)
+
+rf_tune_rs_metrics
+# rf_tune_rs_predictions
+
+tune_roc <- rf_tune_rs_predictions |> 
+  group_by(id) |> 
+  roc_curve(truth = fatal, .pred_fatal) |> 
+  autoplot() +
+  labs("Resamples", title = "Random Forest Tuned ROC curve for Climbing Incident Reports")
+
+tune_roc
+```
+
+**My tuned model is very similar to my out of the box model with a slightly lower accuracy. My tuned model had an accuracy of 0.826 and had a roc_auc of 0.956. The accuracy and the ROC-AUC remained consistent.**
+
+5.
+  a. Use variable importance to determine the terms most highly associated with non-fatal reports?  What about terms associated with fatal reports? OR
+  b. If you aren't able to get at variable importance with your selected algorithm, instead tell me how you might in theory be able to do it. Or how you might determine the important distinguishing words in some other way. 
+  
+```{r, message=FALSE, warning=FALSE}
+#fit the random forest model to the training set and extract variable importance
+fatal_vip <- fit(rf_incidents_tune_final, incidents_train) |> 
+  extract_fit_parsnip() |> 
+  vip() +
+  labs(title = "Variable Importance")
+
+fatal_vip
+```
+
+**Variable importance for a ranger model is showing the variables that seprate the prediction classes the most, but it does not necessarily separate it into predicting fatal vs non-fatal in terms of importance. Therefore the top 10 words shown are the 10 most important words for separating the prediction classes not necessarily for the specific classes.**
+  
+6. Predict fatality of the reports in the test set.  Compare this prediction performance to that of the Naive Bayes and Lasso models.  Why do you think your model performed as it did, relative to the other two?
+
+```{r, message=FALSE, warning=FALSE}
+train_fit_rf <- fit(rf_incidents_tune_final, incidents_train) #fit the random forest model to the training set
+
+test_predict_rf = predict(train_fit_rf, incidents_test) %>% #get prediction probabilities for test
+  bind_cols(incidents_test) %>%  #bind to testing column
+  mutate(fatal = as.factor(fatal))
+
+test_predict_rf %>% 
+  conf_mat(truth = fatal, estimate = .pred_class) %>% #create confusion matrix
+  autoplot(type = "heatmap") + #plot confusion matrix with heatmap
+  theme_bw() + #change theme
+  theme(axis.text.x = element_text(angle = 30, hjust=1)) +
+  #rotate axis labels
+  labs(title = "Random Forest")
+```
+
+Naive-Boyes
+```
+  .metric  .estimator  mean     n std_err .config             
+  <chr>    <chr>      <dbl> <int>   <dbl> <chr>               
+1 accuracy binary     0.797    10 0.00944 Preprocessor1_Model1
+2 roc_auc  binary     0.722    10 0.0123  Preprocessor1_Model1
+```
+
+Lasso
+```
+  .metric  .estimator .estimate .config             
+  <chr>    <chr>          <dbl> <chr>               
+1 accuracy binary         0.916 Preprocessor1_Model1
+2 roc_auc  binary         0.951 Preprocessor1_Model1
+```
+
+
+Out-of-the-box Random Forest
+```
+ .metric  .estimator  mean     n std_err .config             
+  <chr>    <chr>      <dbl> <int>   <dbl> <chr>               
+1 accuracy binary     0.866    10 0.0120  Preprocessor1_Model1
+2 roc_auc  binary     0.956    10 0.00487 Preprocessor1_Model1
+```
+
+Tuned Random Forest
+```
+  .metric  .estimator  mean     n std_err .config             
+  <chr>    <chr>      <dbl> <int>   <dbl> <chr>               
+1 accuracy binary     0.826    10 0.0109  Preprocessor1_Model1
+2 roc_auc  binary     0.956    10 0.00375 Preprocessor1_Model1
+```
+
+**I think the random forest model performed well on this data. However, the random forest had the highest computational cost when tuning. Due to the out-of-the-box random forest and and the lasso model having such high accuracy and roc-auc metrics this computation time becomes a hindrance to the tuned model in terms of efficiency and use. I think the random forest performed as well as it did because of the volume of data as well as the ease of using classification. I think the naive-bayes did the poorest out of the models due to its lack of filtering classifiers and the flaws with its inherent assumption of independence between words.**

@@ -1,0 +1,186 @@
+---
+title: "Lab3"
+author: "Melissa Widas"
+date: "2024-04-17"
+output: html_document
+---
+### Assignment Lab 3:
+
+Due next week: April 23 at 11:59PM
+
+For this assignment you'll use the article data you downloaded from Nexis Uni in Week 2.
+
+```{r, message=FALSE, warning=FALSE}
+library(quanteda)
+library(tm)
+library(topicmodels)
+library(ldatuning)
+library(tidyverse)
+library(tidytext)
+library(reshape2)
+library(here)
+library(LexisNexisTools)
+library(dplyr)
+library(readr)
+library(stringr)
+library(tidyr) #pivot_wider()
+library(ggplot2)
+```
+
+1.  Create a corpus from your articles.
+
+```{r, message = FALSE}
+# load in data 
+# NEXIS terms were mine reclamation
+setwd(here("data/mine_reclamation_files")) #where the .docxs live
+mine_files <- list.files(pattern = ".docx", path = getwd(),
+                      full.names = TRUE, recursive = TRUE, ignore.case = TRUE)
+
+dat_mine <- lnt_read(mine_files, convert_date = FALSE, remove_cover = FALSE)
+
+meta_df <- dat_mine@meta
+articles_df <- dat_mine@articles
+paragraphs_df <- dat_mine@paragraphs
+
+dat2 <- tibble(Date = meta_df$Date,
+               Headline = meta_df$Headline,
+               id = articles_df$ID,
+               text = articles_df$Article)
+```
+
+```{r}
+# create the corpus
+corpus <- corpus(x = dat2, text_field = "text")
+```
+
+2.  Clean the data as appropriate.
+
+```{r, message=FALSE}
+# remove stop words
+add_stops <- stopwords(kind = quanteda_options("language_stopwords"))
+
+tokens(corpus)
+# remove punctuation, numbers, and url
+toks <- tokens(corpus, remove_punct = T, remove_numbers = T, remove_url = T, remove_symbols = T)
+
+tok1 <- tokens_select(toks, pattern = add_stops, selection = "remove")
+
+# make everything lowercase 
+dfm1 <- dfm(tok1, tolower = T)
+# trimming out things that appear only once in the text
+dfm2 <- dfm_trim(dfm1, min_docfreq = 2)
+
+# keep rows where the sum across the row is greater than 0
+# not very relevant in this case but if you had a tweet or something fully character driven it would catch these 
+sel_idx <- slam::row_sums(dfm2) > 0
+dfm <- dfm2[sel_idx,]
+```
+
+3.  Run three models (i.e. with 3 values of k) and select the overall best value for k (the number of topics) - include some justification for your selection: theory, FindTopicsNumber() optimization metrics, interpretability, LDAvis. Select the best single value of k.
+
+```{r, warning=FALSE, message=FALSE}
+k3 <- 3 
+
+topicModel_k3 <- LDA(dfm,
+                     k3, 
+                     method = "Gibbs",
+                     # 1000 is a rule of thumb, but you might need to adjust depending on data
+                     control = list(iter = 1000),
+                     verbose = 25)
+
+result3 <- posterior(topicModel_k3)
+
+results <- FindTopicsNumber(dfm,
+                            topics = seq(from = 2,
+                                         to = 20,
+                                         by = 1),
+                            metrics = c("CaoJuan2009", "Deveaud2014"),
+                            method = "Gibbs",
+                            verbose = T)
+
+FindTopicsNumber_plot(results)
+```
+
+```{r}
+k8 <- 8 
+
+topicModel_k8 <- LDA(dfm,
+                     k8, 
+                     method = "Gibbs",
+                     # 1000 is a rule of thumb, but you might need to adjust depending on data
+                     control = list(iter = 1000),
+                     verbose = 25)
+
+result8 <- posterior(topicModel_k8)
+```
+
+```{r}
+k10 <- 10 
+
+topicModel_k10 <- LDA(dfm,
+                     k10, 
+                     method = "Gibbs",
+                     # 1000 is a rule of thumb, but you might need to adjust depending on data
+                     control = list(iter = 1000),
+                     verbose = 25)
+
+result10 <- posterior(topicModel_k10)
+```
+
+**I will move forward utilizing 8 topics after running the three models. By examining FindTopicsNumber() optimization metrics I determined that the number of topics that optimized the minimization and maximization was 8.**
+
+4.  Plot the top terms in each topic and the distribution of topics across a sample of the documents (constrained by what looks good in the plot).
+
+```{r}
+# distribution of topics in documents
+theta <- result8$topics
+# distribution of terms in topic
+beta <- result8$terms
+vocab <- colnames(beta)
+
+topics <- tidy(topicModel_k8, matrix = "beta")
+
+top_terms <- topics |> 
+  group_by(topic) |> 
+  top_n(10, beta) |> 
+  ungroup() |> 
+  arrange(topic, -beta)
+
+top_terms
+
+top_terms |> 
+  mutate(term = reorder_within(term, beta, topic, sep = "")) |> 
+  ggplot(aes(term, beta, fill = factor(topic))) +
+  geom_col(show.legend = F) +
+  facet_wrap(~topic, scales = "free_y") +
+  scale_x_reordered() +
+  coord_flip()
+```
+
+```{r}
+topic_words <- terms(topicModel_k8, 5)
+topic_names <- apply(topic_words, 2, paste, collapse = " ")
+
+#specify # of examples to inspect
+example_ids <- c(1:5)
+n <- length(example_ids)
+
+# get topic proportions from example documents
+example_props <- theta[example_ids,]
+colnames(example_props) <- topic_names
+
+#combine example topics with identifiers and melt to plotting form
+viz_df <- melt(cbind(data.frame(example_props),
+                     document = factor(1:n),
+                     variable.name = "topic",
+                     id.vars = "document"))
+
+ggplot(data = viz_df, aes(variable, value, fill = document), ylab = "proportion") +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  facet_wrap(~document, ncol = n)
+```
+
+5.  Take a stab at interpreting the resulting topics. What are the key themes discussed in the articles in your data base?
+
+**The key themes discussed in the articles in my database are environmental effects of mining, the office of surface mining and reclamation, federal laws regarding mining, mining on tribal land, public reaction to mining, how information regarding mining is relayed, and federal amendments. Overall these key themes indicate federal involvement with mining and its impacts on the surrounding environment.**

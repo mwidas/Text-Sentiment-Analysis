@@ -11,7 +11,183 @@ output: html_document
 
 1.  Using the data from your Nexis Uni query from Week 2, create a set of word embeddings. To do this, you'll essentially need to recreate the steps in today's example down through the chunk named "pmi". 
 
+
+```{r packages, include = FALSE}
+library(tidytext)
+library(tidyverse)
+library(widyr) 
+library(irlba)
+library(broom) 
+library(textdata)
+library(ggplot2)
+library(dplyr)
+library(here)
+library(LexisNexisTools)
+library(quanteda)
+
+incidents_df <- read_csv("https://raw.githubusercontent.com/MaRo406/EDS-231-text-sentiment/main/data/climbing_reports_model_dat.csv")
+
+# load in data 
+# NEXIS terms were mine reclamation
+setwd(here("data/mine_reclamation_files")) #where the .docxs live
+mine_files <- list.files(pattern = ".docx", path = getwd(),
+                      full.names = TRUE, recursive = TRUE, ignore.case = TRUE)
+
+dat_mine <- lnt_read(mine_files, convert_date = FALSE, remove_cover = FALSE)
+
+meta_df <- dat_mine@meta
+articles_df <- dat_mine@articles
+paragraphs_df <- dat_mine@paragraphs
+
+mine_df <- tibble(Date = meta_df$Date,
+               Headline = meta_df$Headline,
+               id = articles_df$ID,
+               text = articles_df$Article)
+
+# # create the corpus
+# corpus <- corpus(x = dat2, text_field = "text")
+# 
+# # remove stop words
+# add_stops <- stopwords(kind = quanteda_options("language_stopwords"))
+# 
+# # remove punctuation, numbers, and url
+# toks <- tokens(corpus, remove_punct = T, remove_numbers = T, remove_url = T, remove_symbols = T)
+# 
+# tok1 <- tokens_select(toks, pattern = add_stops, selection = "remove")
+# 
+# # make everything lowercase 
+# dfm1 <- dfm(tok1, tolower = T)
+```
+
+## Calculate the unigram probabilities -- how often we see each word in this corpus.
+
+```{r unigrams}
+unigram_probs <- mine_df |> 
+  unnest_tokens(word, text) |> 
+  anti_join(stop_words, by = 'word') |> 
+  count(word, sort = TRUE) |> 
+  mutate(p=n/sum(n))
+
+unigram_probs
+```
+
+OK, so that tells us the probability of each word.
+
+Next, we need to know how often we find each word near each other word -- the skipgram probabilities. In this case we'll define the word context as a five-word window. We'll slide that window across all of our text and record which words occur together within that window.
+
+We'll add an ngramID column that contains constituent information about each 5-gram we constructed by sliding our window.
+
+```{r make-skipgrams}
+skipgrams <- mine_df |> 
+  # break text into 5 word segments through column ngram
+  unnest_tokens(ngram, text, token = "ngrams", n = 5) |> 
+  mutate(ngramID = row_number()) |> 
+  tidyr::unite(skipgramID, ngramID) |> 
+  unnest_tokens(word, ngram) |> 
+  anti_join(stop_words, by = 'word')
+  
+skipgrams
+```
+
+Now we use widyr::pairwise_count() to sum the total # of occurrences of each pair of words.
+
+```{r pairwise_count}
+skipgram_probs  <- skipgrams |> 
+  # within each 5 word id it counts each pair of words occuring
+  pairwise_count(item = word, feature = skipgramID, diag = FALSE, upper = F) |> 
+  #counting probability of a given pair of words
+  mutate(p = n/sum(n))
+
+skipgram_probs
+```
+
+The next step is to normalize these probabilities, that is, to calculate how often words occur together within a window, relative to their total occurrences in the data. We'll also harmnoize the naming conventions from the different functions we used.
+
+```{r norm-prob}
+normalized_probs <- skipgram_probs |> 
+  rename(word1 = item1, word2 = item2) |> 
+  left_join(unigram_probs |> 
+              select(word1 = word, p1 =p), by = 'word1') |> 
+  left_join(unigram_probs |> 
+              select(word2 = word, p2 =p), by = 'word2') |> 
+  mutate(p_together = p/p1/p2)
+
+normalized_probs[1:7]
+```
+
+Now we have all the pieces to calculate the point-wise mutual information (PMI) measure. It's the logarithm of the normalized probability of finding two words together. PMI tells us which words occur together more often than expected based on how often they occurred on their own.
+
+Then we cast to a matrix so we can use matrix factorization and reduce the dimensionality of the data.
+
+```{r pmi}
+pmi_matrix <- normalized_probs |> 
+  mutate(pmi = log10(p_together)) |> 
+  # allows us to know which pair our value corresponds to
+  cast_sparse(word1, word2, pmi)
+```
+
 2.  Think of 3 important words in your data set. Calculate and plot the 10 most semantically similar words for each of them. Identify and interpret any interesting or surprising results.
+
+```{r svd}
+# references all non-0 elements of x and replaces them with 0
+pmi_matrix@x[is.na(pmi_matrix@x)] <- 0
+
+# mathematically intense to decomp
+pmi_svd <- irlba::irlba(pmi_matrix, 100, verbose = FALSE)
+
+word_vectors <- pmi_svd$u
+
+rownames(word_vectors) <- rownames(pmi_matrix)
+```
+
+These vectors in the "u" matrix are contain "left singular values". They are orthogonal vectors that create a 100-dimensional semantic space where we can locate each word. The distance between words in this space gives an estimate of their semantic similarity.
+
+```{r syn_function}
+search_synonyms <- function(word_vectors, selected_vector,
+                            original_word){
+  dat <- word_vectors
+  similarities <- as.data.frame(dat) |> 
+    tibble(token = rownames(dat), similarity = dat[,1]) |> 
+    filter(token != original_word) |> 
+    arrange(desc(similarity)) |> 
+    select(token, similarity)
+  
+  return(similarities)
+}
+```
+
+Let's test it out!
+
+```{r find-synonyms}
+fall <- search_synonyms(word_vectors, word_vectors["reclai",], "fall")
+fall
+
+slip <- search_synonyms(word_vectors, word_vectors["slip",], "slip")
+slip
+
+ice <- search_synonyms(word_vectors, word_vectors["ice",], "ice")
+ice
+
+snow <- search_synonyms(word_vectors, word_vectors["snow",], "snow")
+snow
+```
+
+Here's a plot for visualizing the most similar words to a given target word.
+
+```{r plot-synonyms}
+slip |> 
+  mutate(selected = "slip") |> 
+  bind_rows(fall |> 
+              mutate(selected = "fall")) |> 
+  group_by(selected) |> 
+  top_n(15, similarity) |> 
+  mutate(token = reorder(token, similarity)) |> 
+  ggplot(aes(token, similarity, fill = selected)) +
+  geom_col(show.legend = F) +
+  facet_wrap(~selected, scales = "free") +
+  coord_flip() +
+  labs(y = "similarity", title = "Which word vectors are most similar to slip or fall")
+```
 
 3.  Assemble 3 word math equations that you think could be useful or interesting for exploring the meaning of key words or ideas in your data set.
 
